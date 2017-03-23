@@ -69,7 +69,7 @@ def _new_jinja_env(tpl_path):
 # TODO(vaijab): fix 'S3ResponseError: 301 Moved Permanently', this happens when
 # a connection to S3 is being made from a different region than the one a bucket
 # was created in.
-def upload_template(conn, config, tpl, stack_name):
+def upload_template(config, tpl, stack_name):
     """Upload a template to S3 bucket and returns S3 key url"""
     bn = config.get('templates_bucket_name', '{}-stacks-{}'.format(config['env'], config['region']))
 
@@ -195,7 +195,7 @@ def create_stack(conn, stack_name, tpl_file, config, update=False, dry=False, cr
         return True
 
     if tpl_size > 51200:
-        tpl_url = upload_template(conn, config, tpl, stack_name)
+        tpl_url = upload_template(config, tpl, stack_name)
         tpl_body = None
     else:
         tpl_url = None
