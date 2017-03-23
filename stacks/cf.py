@@ -187,19 +187,27 @@ def create_stack(conn, stack_name, tpl_file, config, update=False, dry=False, cr
 
     tpl_size = len(tpl)
 
-    if dry:
-        print(tpl, flush=True)
-        print('Name: {}'.format(stack_name), file=sys.stderr, flush=True)
-        print('Tags: ' + ', '.join(['{}={}'.format(k, v) for (k, v) in tags.items()]), file=sys.stderr, flush=True)
-        print('Template size:', tpl_size, file=sys.stderr, flush=True)
-        return True
-
     if tpl_size > 51200:
         tpl_url = upload_template(config, tpl, stack_name)
         tpl_body = None
     else:
         tpl_url = None
         tpl_body = tpl
+
+    valid_template, err = validate_template(conn, tpl_body, tpl_url)
+
+    if dry:
+        print(tpl, flush=True)
+        print('Name: {}'.format(stack_name), file=sys.stderr, flush=True)
+        print('Tags: ' + ', '.join(['{}={}'.format(k, v) for (k, v) in tags.items()]), file=sys.stderr, flush=True)
+        print('Template size:', tpl_size, file=sys.stderr, flush=True)
+
+    if not valid_template:
+        print(err)
+        exit(1)
+
+    if dry:
+        exit(0)
 
     try:
         if update and create_on_update and not stack_exists(conn, stack_name):
@@ -226,6 +234,21 @@ def create_stack(conn, stack_name, tpl_file, config, update=False, dry=False, cr
         print(err.message)
         sys.exit(1)
     return stack_name
+
+
+def validate_template(conn, template_body, template_url):
+    """Validates a specified template
+    If both template_body and template_url are passed, template_body is used.
+    :param conn: boto.cloudformation.connection
+    :param template_body: String containing the template body
+    :param template_url: Location of file containing the template body
+    :return: True/False, error_message
+    """
+    try:
+        conn.validate_template(template_body=template_body, template_url=template_url)
+    except BotoServerError as err:
+        return False, '{}: {}'.format(err.code, err.message)
+    return True, None
 
 
 def _extract_tags(metadata):
