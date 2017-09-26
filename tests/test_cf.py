@@ -31,7 +31,7 @@ class TestTemplate(unittest.TestCase):
         self.assertEqual(err.exception.code, 1)
 
 
-@mock_cloudformation
+@mock_cloudformation_deprecated
 class TestStackActions(unittest.TestCase):
 
     def setUp(self):
