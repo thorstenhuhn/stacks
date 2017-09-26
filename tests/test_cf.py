@@ -1,6 +1,6 @@
 import unittest
 import boto
-from moto import mock_cloudformation
+from moto import mock_cloudformation_deprecated
 
 from stacks import cf
 
