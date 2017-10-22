@@ -346,7 +346,7 @@ Define an AutoScaling Group Template
           Ref: LaunchConfiguration
         VPCZoneIdentifier:
         {% for n in range(vpc_subnets|count) %}
-          - {{ get_stack_resource(cf_conn, env + '-vpc', 'Subnet' + n|string) }}
+          - {{ get_stack_resource(cloudformation_client, env + '-vpc', 'Subnet' + n|string) }}
         {% endfor -%}
         TerminationPolicies:
           - 'OldestInstance'
@@ -368,11 +368,11 @@ Define an AutoScaling Group Template
       Type: AWS::AutoScaling::LaunchConfiguration
       Properties:
         AssociatePublicIpAddress: true
-        ImageId: {{ get_ami_id(ec2_conn, ami_name) }}
+        ImageId: {{ get_ami_id(ec2_client, ami_name) }}
         InstanceMonitoring: false
         InstanceType: {{ instance_type }}
         SecurityGroups:
-          - {{ get_stack_resource(cf_conn, env + '-vpc', 'DefaultSG') }}
+          - {{ get_stack_resource(cloudformation_client, env + '-vpc', 'DefaultSG') }}
 
 
 This template demonstrates the power of cross-stack referencing.

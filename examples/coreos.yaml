@@ -14,7 +14,7 @@ Resources:
     Type: AWS::IAM::InstanceProfile
     Properties:
       Roles:
-        - {{ get_stack_output(cf_conn, infra_stack_name, 'CoreOSRole') }}
+        - {{ get_stack_output(cloudformation_client, infra_stack_name, 'CoreOSRole') }}
       Path: /
 
   RolePolicies:
@@ -22,7 +22,7 @@ Resources:
     Properties:
       PolicyName: {{ env }}-coreos
       Roles:
-        - {{ get_stack_output(cf_conn, infra_stack_name, 'CoreOSRole') }}
+        - {{ get_stack_output(cloudformation_client, infra_stack_name, 'CoreOSRole') }}
       PolicyDocument:
         Statement:
         - Resource: '*'
@@ -58,9 +58,9 @@ Resources:
           - Fn::GetAZs: ''
       LaunchConfigurationName: {Ref: CoreOSLaunchConfig}
       VPCZoneIdentifier:
-        - {{ get_stack_output(cf_conn, infra_stack_name, 'SubnetAZ0') }}
-        - {{ get_stack_output(cf_conn, infra_stack_name, 'SubnetAZ1') }}
-        - {{ get_stack_output(cf_conn, infra_stack_name, 'SubnetAZ2') }}
+        - {{ get_stack_output(cloudformation_client, infra_stack_name, 'SubnetAZ0') }}
+        - {{ get_stack_output(cloudformation_client, infra_stack_name, 'SubnetAZ1') }}
+        - {{ get_stack_output(cloudformation_client, infra_stack_name, 'SubnetAZ2') }}
       TerminationPolicies:
         - 'OldestInstance'
         - 'Default'
@@ -86,12 +86,12 @@ Resources:
     Properties:
       AssociatePublicIpAddress: true
       IamInstanceProfile: {Ref: InstanceProfile}
-      ImageId: {{ get_ami_id(ec2_conn, coreos_ami_name) }}
+      ImageId: {{ get_ami_id(ec2_client, coreos_ami_name) }}
       InstanceMonitoring: false
       InstanceType: {% if env == 'prod' %}m4.large{% else %}t2.small{% endif %}
       KeyName: {{ ssh_key_name }}
       SecurityGroups:
-        - {{ get_stack_output(cf_conn, infra_stack_name, 'DefaultSG') }}
+        - {{ get_stack_output(cloudformation_client, infra_stack_name, 'DefaultSG') }}
       BlockDeviceMappings:
         - DeviceName: "/dev/xvda"
           Ebs:

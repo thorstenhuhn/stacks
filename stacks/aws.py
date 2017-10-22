@@ -1,7 +1,6 @@
 import time
 
-from boto.exception import BotoServerError
-
+from botocore.exceptions import ClientError
 
 def throttling_retry(func):
     """Retry when AWS is throttling API calls"""
@@ -11,8 +10,8 @@ def throttling_retry(func):
             try:
                 retval = func(*args)
                 return retval
-            except BotoServerError as err:
-                if (err.code == 'Throttling' or err.code == 'RequestLimitExceeded') and retries <= 3:
+            except ClientError as err:
+                if (err.response['Error']['Code'] == 'Throttling' or err.response['Error']['Code'] == 'RequestLimitExceeded') and retries <= 3:
                     sleep = 3 * (2**retries)
                     print('Being throttled. Retrying after {} seconds..'.format(sleep))
                     time.sleep(sleep)
@@ -23,67 +22,70 @@ def throttling_retry(func):
 
 
 @throttling_retry
-def get_ami_id(conn, name):
+def get_ami_id(client, name):
     """Return the first AMI ID given its name"""
-    images = conn.get_all_images(filters={'name': name})
-    conn.close()
+    images = client.describe_images(Filters=[{'Name':'name', 'Values':[ name ]}])['Images']
     if len(images) != 0:
-        return images[0].id
+        return images[0]['ImageId']
     else:
         raise RuntimeError('{} AMI not found'.format(name))
 
 
 @throttling_retry
-def get_zone_id(conn, name):
+def get_zone_id(client, name):
     """Return the first Route53 zone ID given its name"""
-    zone = conn.get_zone(name)
-    conn.close()
-    if zone:
-        return zone.id
-    else:
-        raise RuntimeError('{} zone not found'.format(name))
+    prefix = '/hostedzone/'
+    zones = client.list_hosted_zones_by_name(DNSName=name, MaxItems='1')['HostedZones']
+    for zone in zones:
+        if zone['Name'] == name:
+            zone_id = zone['Id']
+            if zone_id.startswith(prefix):
+                return zone_id[len(prefix):]
+            return zone_id
+    raise RuntimeError('{} zone not found'.format(name))
 
 
 @throttling_retry
-def get_vpc_id(conn, name):
+def get_vpc_id(client, name):
     """Return the first VPC ID given its name and region"""
-    vpcs = conn.get_all_vpcs(filters={'tag:Name': name})
-    conn.close()
+    vpcs = client.describe_vpcs(Filters=[{'Name':'tag:Name', 'Values':[ name ]}])['Vpcs']
     if len(vpcs) == 1:
-        return vpcs[0].id
+        return vpcs[0]['VpcId']
     else:
         raise RuntimeError('{} VPC not found'.format(name))
 
 
 @throttling_retry
-def get_stack_output(conn, name, key):
+def get_stack_output(client, name, key):
     """Return stack output key value"""
-    result = conn.describe_stacks(name)
-    if len(result) != 1:
+    stacks = client.describe_stacks(StackName=name)['Stacks']
+    if len(stacks) != 1:
         raise RuntimeError('{} stack not found'.format(name))
-    outputs = [s.outputs for s in result][0]
+    outputs = [s['Outputs'] for s in stacks][0]
     for output in outputs:
-        if output.key == key:
-            return output.value
+        if output['OutputKey'] == key:
+            return output['OutputValue']
     raise RuntimeError('{} output not found'.format(key))
 
 
 @throttling_retry
-def get_stack_tag(conn, name, tag):
+def get_stack_tag(client, name, key):
     """Return stack tag"""
-    result = conn.describe_stacks(name)
-    if len(result) != 1:
+    stacks = client.describe_stacks(StackName=name)['Stacks']
+    if len(stacks) != 1:
         raise RuntimeError('{} stack not found'.format(name))
-    tags = [s.tags for s in result][0]
-    return tags.get(tag, '')
+    tags = [s['Tags'] for s in stacks][0]
+    for tag in tags:
+        if tag['Key'] == key:
+            return tag['Value']
+    return ''
 
 
 @throttling_retry
-def get_stack_resource(conn, stack_name, logical_id):
+def get_stack_resource(client, stack_name, logical_id):
     """Return a physical_resource_id given its logical_id"""
-    resources = conn.describe_stack_resources(stack_name_or_id=stack_name)
-    for r in resources:
-        # TODO: would be nice to check for resource_status
-        if r.logical_resource_id == logical_id:
-            return r.physical_resource_id
+    resource = client.describe_stack_resource(StackName=stack_name, LogicalResourceId=logical_id)['StackResourceDetail']
+    if resource != None:
+        return resource['PhysicalResourceId']
     return None
+

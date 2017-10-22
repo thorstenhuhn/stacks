@@ -6,11 +6,7 @@ import os
 import signal
 from time import time
 
-import boto.ec2
-import boto.vpc
-import boto.route53
-import boto.cloudformation
-import boto.s3
+import boto3
 
 from stacks import cli
 from stacks import aws
@@ -47,6 +43,7 @@ def main():
     config['get_vpc_id'] = aws.get_vpc_id
     config['get_zone_id'] = aws.get_zone_id
     config['get_stack_output'] = aws.get_stack_output
+    config['get_stack_tag'] = aws.get_stack_tag
     config['get_stack_resource'] = aws.get_stack_resource
 
     # Figure out profile value in the following order
@@ -84,41 +81,30 @@ def main():
 
     config['region'] = region
 
-    # Not great, but try to catch everything. Above should be refactored in a
-    # function which handles setting up connections to different aws services
+    # Not great, but try to catch everything.
     try:
-        ec2_conn = boto.ec2.connect_to_region(region, profile_name=profile)
-        vpc_conn = boto.vpc.connect_to_region(region, profile_name=profile)
-        cf_conn = boto.cloudformation.connect_to_region(region, profile_name=profile)
-        r53_conn = boto.route53.connect_to_region(region, profile_name=profile)
-        s3_conn = boto.s3.connect_to_region(region, profile_name=profile)
-        config['ec2_conn'] = ec2_conn
-        config['vpc_conn'] = vpc_conn
-        config['cf_conn'] = cf_conn
-        config['r53_conn'] = r53_conn
-        config['s3_conn'] = s3_conn
+        session = boto3.Session(region_name=region, profile_name=profile)
+        for service_name in [ 'ec2', 'cloudformation', 'route53', 's3' ]:
+            config[service_name + '_client'] = session.client(service_name)
     # TODO(alekna): Fix too broad exception
     except:
         print(sys.exc_info()[1])
         sys.exit(1)
 
     if args.subcommand == 'resources':
-        output = cf.stack_resources(cf_conn, args.name, args.logical_id)
+        output = cf.stack_resources(config['cloudformation_client'], args.name, args.logical_id)
         if output:
             print(output)
-        cf_conn.close()
 
     if args.subcommand == 'outputs':
-        output = cf.stack_outputs(cf_conn, args.name, args.output_name)
+        output = cf.stack_outputs(config['cloudformation_client'], args.name, args.output_name)
         if output:
             print(output)
-        cf_conn.close()
 
     if args.subcommand == 'list':
-        output = cf.list_stacks(cf_conn, args.name, args.verbose)
+        output = cf.list_stacks(config['cloudformation_client'], args.name, args.verbose)
         if output:
             print(output)
-        cf_conn.close()
 
     if args.subcommand == 'create' or args.subcommand == 'update':
         if args.property:
@@ -126,30 +112,30 @@ def main():
             config.update(properties)
 
         if args.subcommand == 'create':
-            stack_name = cf.create_stack(cf_conn, args.name, args.template, config, dry=args.dry_run)
+            stack_name = cf.create_stack(config['cloudformation_client'], args.name, args.template, config, dry=args.dry_run)
             if args.events_follow and not args.dry_run:
-                stack_status = cf.print_events(cf_conn, stack_name, args.events_follow)
+                stack_status = cf.print_events(config['cloudformation_client'], stack_name, args.events_follow)
                 if stack_status in FAILED_STACK_STATES + ROLLBACK_STACK_STATES:
                     sys.exit(1)
         else:
             from_timestamp = time()
-            stack_name = cf.create_stack(cf_conn, args.name, args.template, config, update=True, dry=args.dry_run,
+            stack_name = cf.create_stack(config['cloudformation_client'], args.name, args.template, config, update=True, dry=args.dry_run,
                                          create_on_update=args.create_on_update)
             if args.events_follow and not args.dry_run:
-                stack_status = cf.print_events(cf_conn, stack_name, args.events_follow, from_timestamp=from_timestamp)
+                stack_status = cf.print_events(config['cloudformation_client'], stack_name, args.events_follow, from_timestamp=from_timestamp)
                 if stack_status in FAILED_STACK_STATES + ROLLBACK_STACK_STATES:
                     sys.exit(1)
 
     if args.subcommand == 'delete':
         from_timestamp = time()
-        cf.delete_stack(cf_conn, args.name, region, profile, args.yes)
+        cf.delete_stack(config['cloudformation_client'], args.name, region, profile, args.yes)
         if args.events_follow:
-            stack_status = cf.print_events(cf_conn, args.name, args.events_follow, from_timestamp=from_timestamp)
+            stack_status = cf.print_events(config['cloudformation_client'], args.name, args.events_follow, from_timestamp=from_timestamp)
             if stack_status in FAILED_STACK_STATES:
                 sys.exit(1)
 
     if args.subcommand == 'events':
-        cf.print_events(cf_conn, args.name, args.events_follow, args.lines)
+        cf.print_events(config['cloudformation_client'], args.name, args.events_follow, args.lines)
 
 
 def handler(signum, _):

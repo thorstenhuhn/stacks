@@ -11,14 +11,14 @@ import yaml
 import json
 import jinja2
 import hashlib
-import boto
+import boto3
 
 from os import path
 from jinja2 import meta
 from fnmatch import fnmatch
 from tabulate import tabulate
-from boto.exception import BotoServerError
-from operator import attrgetter
+from botocore.exceptions import ClientError
+from operator import itemgetter
 from datetime import datetime
 
 from awscli.customizations.cloudformation.yamlhelper import intrinsics_multi_constructor
@@ -29,6 +29,12 @@ from stacks.states import FAILED_STACK_STATES, COMPLETE_STACK_STATES, ROLLBACK_S
 
 YES = ['y', 'Y', 'yes', 'YES', 'Yes']
 
+
+def dict_to_list(dictionary):
+    result = []
+    for item in dictionary:
+        result.append({'Key':item, 'Value':dictionary[item]})
+    return result
 
 def gen_template(tpl_file, config):
     """Return a tuple of json string template and options dict"""
@@ -77,41 +83,38 @@ def upload_template(config, tpl, stack_name):
     """Upload a template to S3 bucket and returns S3 key url"""
     bn = config.get('templates_bucket_name', '{}-stacks-{}'.format(config['env'], config['region']))
 
-    try:
-        b = config['s3_conn'].get_bucket(bn)
-    except boto.exception.S3ResponseError as err:
-        if err.code == 'NoSuchBucket':
-            print('Bucket {} does not exist.'.format(bn))
-        else:
-            print(err)
-        sys.exit(1)
+    s3 = config['s3_resource']
 
     h = _calc_md5(tpl)
-    k = boto.s3.key.Key(b)
-    k.key = '{}/{}/{}'.format(config['env'], stack_name, h)
-    k.set_contents_from_string(tpl)
-    url = k.generate_url(expires_in=30)
+    key = '{}/{}/{}'.format(config['env'], stack_name, h)
+
+    s3.Object(bn, key).put(Body=tpl)
+
+    url = '{}/{}/{}'.format(s3.meta.endpoint_url, bn, key)
+
     return url
 
 
-def stack_resources(conn, stack_name, logical_resource_id=None):
+def stack_resources(client, stack_name, logical_resource_id=None):
     """List stack resources"""
     try:
-        result = conn.describe_stack_resources(stack_name_or_id=stack_name,
-                                               logical_resource_id=logical_resource_id)
-    except BotoServerError as err:
-        print(err.message)
+        if logical_resource_id is None:
+            result = client.describe_stack_resources(StackName=stack_name)
+        else:
+            result = client.describe_stack_resources(StackName=stack_name, LogicalResourceId=logical_resource_id)
+    except ClientError as err:
+        print(err.response['Error']['Message'])
         sys.exit(1)
     resources = []
     if logical_resource_id:
-        resources.append([r.physical_resource_id for r in result])
+        resources.append([r['PhysicalResourceId'] for r in result['StackResources']])
     else:
-        for r in result:
+        for r in result['StackResources']:
             columns = [
-                r.logical_resource_id,
-                r.physical_resource_id,
-                r.resource_type,
-                r.resource_status,
+                r['LogicalResourceId'],
+                r['PhysicalResourceId'],
+                r['ResourceType'],
+                r['ResourceStatus'],
             ]
             resources.append(columns)
 
@@ -120,39 +123,39 @@ def stack_resources(conn, stack_name, logical_resource_id=None):
     return None
 
 
-def stack_outputs(conn, stack_name, output_name):
+def stack_outputs(client, stack_name, output_name):
     """List stacks outputs"""
     try:
-        result = conn.describe_stacks(stack_name)
-    except BotoServerError as err:
-        print(err.message)
+        result = client.describe_stacks(StackName=stack_name)
+    except ClientError as err:
+        print(err.response['Error']['Message'])
         sys.exit(1)
 
     outputs = []
-    outs = [s.outputs for s in result][0]
+    outs = [s['Outputs'] for s in result['Stacks']][0]
     for o in outs:
         if not output_name:
-            columns = [o.key, o.value]
+            columns = [o['OutputKey'], o['OutputValue']]
             outputs.append(columns)
-        elif output_name and o.key == output_name:
-            outputs.append([o.value])
+        elif output_name and o['OutputKey'] == output_name:
+            outputs.append([o['OutputValue']])
 
     if len(result) >= 1:
         return tabulate(outputs, tablefmt='plain')
     return None
 
 
-def list_stacks(conn, name_filter='*', verbose=False):
+def list_stacks(client, name_filter='*', verbose=False):
     """List active stacks"""
     states = FAILED_STACK_STATES + COMPLETE_STACK_STATES + IN_PROGRESS_STACK_STATES + ROLLBACK_STACK_STATES
-    s = conn.list_stacks(states)
+    s = client.list_stacks(StackStatusFilter=states)['StackSummaries']
 
     stacks = []
     for n in s:
-        if name_filter and fnmatch(n.stack_name, name_filter):
-            columns = [n.stack_name, n.stack_status]
+        if name_filter and fnmatch(n['StackName'], name_filter):
+            columns = [n['StackName'], n['StackStatus']]
             if verbose:
-                env = get_stack_tag(conn, n.stack_name, 'Env')
+                env = get_stack_tag(client, n['StackName'], 'Env')
                 columns.append(env)
                 columns.append(n.template_description)
             stacks.append(columns)
@@ -162,7 +165,7 @@ def list_stacks(conn, name_filter='*', verbose=False):
     return None
 
 
-def create_stack(conn, stack_name, tpl_file, config, update=False, dry=False, create_on_update=False):
+def create_stack(client, stack_name, tpl_file, config, update=False, dry=False, create_on_update=False):
     """Create or update CloudFormation stack from a jinja2 template"""
     tpl, metadata = gen_template(tpl_file, config)
 
@@ -180,7 +183,7 @@ def create_stack(conn, stack_name, tpl_file, config, update=False, dry=False, cr
     else:
         name_from_metadata = None
         tags = default_tags
-        disable_rollback = None
+        disable_rollback = False
 
     if not stack_name:
         stack_name = name_from_metadata
@@ -197,36 +200,45 @@ def create_stack(conn, stack_name, tpl_file, config, update=False, dry=False, cr
         print('Template size:', tpl_size, file=sys.stderr, flush=True)
         return True
 
-    if tpl_size > 51200:
-        tpl_url = upload_template(config, tpl, stack_name)
-        tpl_body = None
-    else:
-        tpl_url = None
-        tpl_body = tpl
+    tags = dict_to_list(tags)
 
     try:
-        if update and create_on_update and not stack_exists(conn, stack_name):
-            conn.create_stack(stack_name, template_url=tpl_url, template_body=tpl_body,
-                              tags=tags, capabilities=['CAPABILITY_IAM'],
-                              disable_rollback=disable_rollback)
-        elif update:
-            conn.update_stack(stack_name, template_url=tpl_url, template_body=tpl_body,
-                              tags=tags, capabilities=['CAPABILITY_IAM'],
-                              disable_rollback=disable_rollback)
+        if tpl_size > 51200:
+            tpl_url = upload_template(config, tpl, stack_name)
+            if update and create_on_update and not stack_exists(client, stack_name):
+                client.create_stack(StackName=stack_name, TemplateURL=tpl_url,
+                                  Tags=tags, Capabilities=['CAPABILITY_IAM'],
+                                  DisableRollback=disable_rollback)
+            elif update:
+                client.update_stack(StackName=stack_name, TemplateURL=tpl_url,
+                                  Tags=tags, Capabilities=['CAPABILITY_IAM'],
+                                  DisableRollback=disable_rollback)
+            else:
+                client.create_stack(StackName=stack_name, TemplateURL=tpl_url,
+                                  Tags=tags, Capabilities=['CAPABILITY_IAM'],
+                                  DisableRollback=disable_rollback)
         else:
-            conn.create_stack(stack_name, template_url=tpl_url, template_body=tpl_body,
-                              tags=tags, capabilities=['CAPABILITY_IAM'],
-                              disable_rollback=disable_rollback)
-    except BotoServerError as err:
+            if update and create_on_update and not stack_exists(client, stack_name):
+                client.create_stack(StackName=stack_name, TemplateBody=tpl,
+                                  Tags=tags, Capabilities=['CAPABILITY_IAM'],
+                                  DisableRollback=disable_rollback)
+            elif update:
+                client.update_stack(StackName=stack_name, TemplateBody=tpl,
+                                  Tags=tags, Capabilities=['CAPABILITY_IAM'])
+            else:
+                client.create_stack(StackName=stack_name, TemplateBody=tpl,
+                                  Tags=tags, Capabilities=['CAPABILITY_IAM'],
+                                  DisableRollback=disable_rollback)
+    except ClientError as err:
         # Do not exit with 1 when one of the below messages are returned
         non_error_messages = [
             'No updates are to be performed',
             'already exists',
         ]
-        if any(s in err.message for s in non_error_messages):
-            print(err.message)
+        if any(s in err.response['Error']['Message'] for s in non_error_messages):
+            print(err.response['Error']['Message'])
             sys.exit(0)
-        print(err.message)
+        print(err.response['Error']['Message'])
         sys.exit(1)
     return stack_name
 
@@ -245,7 +257,7 @@ def _calc_md5(j):
     return hashlib.md5(j.encode()).hexdigest()
 
 
-def delete_stack(conn, stack_name, region, profile, confirm):
+def delete_stack(client, stack_name, region, profile, confirm):
     """Deletes stack given its name"""
     msg = ('You are about to delete the following stack:\n'
            'Name: {}\n'
@@ -259,39 +271,42 @@ def delete_stack(conn, stack_name, region, profile, confirm):
 
     if response in YES:
         try:
-            conn.delete_stack(stack_name)
-        except BotoServerError as err:
-            if 'does not exist' in err.message:
-                print(err.message)
+            client.delete_stack(StackName=stack_name)
+        except ClientError as err:
+            if 'does not exist' in err.response['Error']['Message']:
+                print(err.response['Error']['Message'])
                 sys.exit(0)
             else:
-                print(err.message)
+                print(err.response['Error']['Message'])
                 sys.exit(1)
     else:
         sys.exit(0)
 
 
-def get_events(conn, stack_name, next_token):
+def get_events(client, stack_name, next_token):
     """Get stack events"""
     try:
-        events = conn.describe_stack_events(stack_name, next_token)
-        next_token = events.next_token
-        return sorted_events(events), next_token
-    except BotoServerError as err:
-        if 'does not exist' in err.message:
-            print(err.message)
+        if next_token is None:
+            events = client.describe_stack_events(StackName=stack_name)
+        else:    
+            events = client.describe_stack_events(StackName=stack_name, NextToken=next_token)
+        next_token = events.get('NextToken', None)
+        return sorted_events(events['StackEvents']), next_token
+    except ClientError as err:
+        if 'does not exist' in err.response['Error']['Message']:
+            print(err.response['Error']['Message'])
             sys.exit(0)
         else:
-            print(err.message)
+            print(err.response['Error']['Message'])
             sys.exit(1)
 
 
 def sorted_events(events):
     """Sort stack events by timestamp"""
-    return sorted(events, key=attrgetter('timestamp'))
+    return sorted(events, key=itemgetter('Timestamp'))
 
 
-def print_events(conn, stack_name, follow, lines=100, from_timestamp=0):
+def print_events(client, stack_name, follow, lines=100, from_timestamp=0):
     """Prints tabulated list of events"""
     events_display = []
     seen_ids = set()
@@ -299,22 +314,22 @@ def print_events(conn, stack_name, follow, lines=100, from_timestamp=0):
     from_timestamp = datetime.fromtimestamp(from_timestamp)
 
     while True:
-        events, next_token = get_events(conn, stack_name, next_token)
-        status = get_stack_status(conn, stack_name)
+        events, next_token = get_events(client, stack_name, next_token)
+        status = get_stack_status(client, stack_name)
         if follow:
-            events_display = [(event.timestamp, event.resource_status, event.resource_type,
-                               event.logical_resource_id, event.resource_status_reason) for event in events
-                              if event.event_id not in seen_ids and event.timestamp >= from_timestamp]
+            events_display = [(event.get('Timestamp', ''), event.get('ResourceStatus', ''), event.get('ResourceType', ''),
+                               event.get('LogicalResourceId', ''), event.get('ResourceStatusReason', '')) for event in events
+                              if event['EventId'] not in seen_ids and event['Timestamp'] >= from_timestamp]
             if len(events_display) > 0:
                 print(tabulate(events_display, tablefmt='plain'), flush=True)
-                seen_ids |= set([event.event_id for event in events])
+                seen_ids |= set([event['EventId'] for event in events])
             if status not in IN_PROGRESS_STACK_STATES and next_token is None:
                 break
             if next_token is None:
                 time.sleep(5)
         else:
-            events_display.extend([(event.timestamp, event.resource_status, event.resource_type,
-                                    event.logical_resource_id, event.resource_status_reason)
+            events_display.extend([(event.get('Timestamp', ''), event.get('ResourceStatus', ''), event.get('ResourceType', ''),
+                                    event.get('LogicalResourceId', ''), event.get('ResourceStatusReason', ''))
                                    for event in events])
             if len(events_display) >= lines or next_token is None:
                 break
@@ -326,27 +341,27 @@ def print_events(conn, stack_name, follow, lines=100, from_timestamp=0):
 
 
 @throttling_retry
-def get_stack_status(conn, stack_name):
+def get_stack_status(client, stack_name):
     """Check stack status"""
     stacks = []
-    resp = conn.list_stacks()
-    stacks.extend(resp)
-    while resp.next_token:
-        resp = conn.list_stacks(next_token=resp.next_token)
-        stacks.extend(resp)
+    resp = client.describe_stacks()
+    stacks.extend(resp['Stacks'])
+    while 'NextToken' in resp.keys():
+        resp = client.describe_stacks(NextToken=resp['NextToken'])
+        stacks.extend(resp['Stacks'])
     for s in stacks:
-        if s.stack_name == stack_name and s.stack_status != 'DELETE_COMPLETE':
-            return s.stack_status
+        if s['StackName'] == stack_name and s['StackStatus'] != 'DELETE_COMPLETE':
+            return s['StackStatus']
     return None
 
 
-def stack_exists(conn, stack_name):
+def stack_exists(client, stack_name):
     """Check whether stack_name exists
 
     CF keeps deleted duplicate stack names with DELETE_COMPLETE status, which is
     treated as non existing stack.
     """
-    status = get_stack_status(conn, stack_name)
+    status = get_stack_status(client, stack_name)
     if status == 'DELETE_COMPLETE' or status is None:
         return False
     return True

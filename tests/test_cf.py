@@ -1,9 +1,15 @@
 import unittest
-import boto
-from moto import mock_cloudformation_deprecated
+import boto3
+from moto import mock_cloudformation
 
 from stacks import cf
 
+
+def list_to_dict(list):
+    result = {}
+    for item in list:
+        result[item['Key']] = item['Value']
+    return result
 
 class TestTemplate(unittest.TestCase):
 
@@ -31,7 +37,7 @@ class TestTemplate(unittest.TestCase):
         self.assertEqual(err.exception.code, 1)
 
 
-@mock_cloudformation_deprecated
+@mock_cloudformation
 class TestStackActions(unittest.TestCase):
 
     def setUp(self):
@@ -40,51 +46,56 @@ class TestStackActions(unittest.TestCase):
             'custom_tag': 'custom-tag-value',
             'region': 'us-east-1',
         }
-        self.config['cf_conn'] = boto.cloudformation.connect_to_region(self.config['region'])
-        self.config['s3_conn'] = boto.s3.connect_to_region(self.config['region'])
+        session = boto3.Session(region_name=self.config['region'])
+        for service_name in [ 'ec2', 'cloudformation', 'route53', 's3' ]:
+            self.config[service_name + '_client'] = session.client(service_name)
 
     def test_create_stack(self):
         stack_name = None
         with open('tests/fixtures/create_stack_template.yaml') as tpl_file:
-            cf.create_stack(self.config['cf_conn'], stack_name, tpl_file, self.config)
+            cf.create_stack(self.config['cloudformation_client'], stack_name, tpl_file, self.config)
 
-        stack = self.config['cf_conn'].describe_stacks('unittest-infra')[0]
-        self.assertEqual('unittest-infra', stack.stack_name)
-        self.assertEqual(self.config['env'], stack.tags['Env'])
-        self.assertEqual(self.config['custom_tag'], stack.tags['Test'])
-        self.assertEqual('b08c2e9d7003f62ba8ffe5c985c50a63', stack.tags['MD5Sum'])
+        stack = self.config['cloudformation_client'].describe_stacks(StackName='unittest-infra')['Stacks'][0]
+        tags = list_to_dict(stack['Tags'])
+        self.assertEqual('unittest-infra', stack['StackName'])
+        self.assertEqual(self.config['env'], tags['Env'])
+        self.assertEqual(self.config['custom_tag'], tags['Test'])
+        self.assertEqual('b08c2e9d7003f62ba8ffe5c985c50a63', tags['MD5Sum'])
 
     def test_update_stack(self):
         stack_name = None
         with open('tests/fixtures/create_stack_template.yaml') as tpl_file:
-            cf.create_stack(self.config['cf_conn'], stack_name, tpl_file,
+            cf.create_stack(self.config['cloudformation_client'], stack_name, tpl_file,
                             self.config, update=True)
-        stack = self.config['cf_conn'].describe_stacks('unittest-infra')[0]
-        self.assertEqual('b08c2e9d7003f62ba8ffe5c985c50a63', stack.tags['MD5Sum'])
+        stack = self.config['cloudformation_client'].describe_stacks(StackName='unittest-infra')['Stacks'][0]
+        tags = list_to_dict(stack['Tags'])
+        self.assertEqual('b08c2e9d7003f62ba8ffe5c985c50a63', tags['MD5Sum'])
 
     def test_create_on_update(self):
         stack_name = 'create-on-update-stack'
         with open('tests/fixtures/create_stack_template.yaml') as tpl_file:
-            cf.create_stack(self.config['cf_conn'], stack_name, tpl_file,
+            cf.create_stack(self.config['cloudformation_client'], stack_name, tpl_file,
                             self.config, update=True, create_on_update=True)
-        stack = self.config['cf_conn'].describe_stacks(stack_name)[0]
-        self.assertEqual('b08c2e9d7003f62ba8ffe5c985c50a63', stack.tags['MD5Sum'])
+        stack = self.config['cloudformation_client'].describe_stacks(StackName=stack_name)['Stacks'][0]
+        tags = list_to_dict(stack['Tags'])
+        self.assertEqual('b08c2e9d7003f62ba8ffe5c985c50a63', tags['MD5Sum'])
 
     def test_create_stack_no_stack_name(self):
         stack_name = None
         with open('tests/fixtures/no_metadata_template.yaml') as tpl_file:
             with self.assertRaises(SystemExit) as err:
-                cf.create_stack(self.config['cf_conn'], stack_name, tpl_file, self.config)
+                cf.create_stack(self.config['cloudformation_client'], stack_name, tpl_file, self.config)
             self.assertEqual(err.exception.code, 1)
 
     def test_create_stack_no_metadata(self):
         stack_name = 'my-stack'
         with open('tests/fixtures/no_metadata_template.yaml') as tpl_file:
-            cf.create_stack(self.config['cf_conn'], stack_name, tpl_file, self.config)
-        stack = self.config['cf_conn'].describe_stacks('my-stack')[0]
-        self.assertEqual('my-stack', stack.stack_name)
-        self.assertEqual(self.config['env'], stack.tags['Env'])
-        self.assertEqual('b08c2e9d7003f62ba8ffe5c985c50a63', stack.tags['MD5Sum'])
+            cf.create_stack(self.config['cloudformation_client'], stack_name, tpl_file, self.config)
+        stack = self.config['cloudformation_client'].describe_stacks(StackName='my-stack')['Stacks'][0]
+        tags = list_to_dict(stack['Tags'])
+        self.assertEqual('my-stack', stack['StackName'])
+        self.assertEqual(self.config['env'], tags['Env'])
+        self.assertEqual('b08c2e9d7003f62ba8ffe5c985c50a63', tags['MD5Sum'])
 
 if __name__ == '__main__':
     unittest.main()
