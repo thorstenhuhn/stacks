@@ -12,6 +12,7 @@ import json
 import jinja2
 import hashlib
 import boto3
+import pytz
 
 from os import path
 from jinja2 import meta
@@ -179,7 +180,7 @@ def create_stack(client, stack_name, tpl_file, config, update=False, dry=False, 
         tags = _extract_tags(metadata)
         tags.update(default_tags)
         name_from_metadata = metadata.get('name')
-        disable_rollback = metadata.get('disable_rollback')
+        disable_rollback = metadata.get('disable_rollback', False)
     else:
         name_from_metadata = None
         tags = default_tags
@@ -311,7 +312,7 @@ def print_events(client, stack_name, follow, lines=100, from_timestamp=0):
     events_display = []
     seen_ids = set()
     next_token = None
-    from_timestamp = datetime.fromtimestamp(from_timestamp)
+    from_timestamp = datetime.fromtimestamp(from_timestamp, tz=pytz.utc)
 
     while True:
         events, next_token = get_events(client, stack_name, next_token)
